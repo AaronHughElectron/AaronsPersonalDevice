@@ -6,17 +6,17 @@
 
 // Pin definitions
 const int batteryMonitor = 2;  // Battery monitor circuit
-const int wakeupPin = 3;  // OR logic wake up circuit
+const int plugDetectPin = 3;  // Plug detection circuit
 const int buttonPin = 4;  // Push button input (active LOW with internal pull-up)
 const int pwmPin = 5;  // PWM output pin (to drive the MOSFET)
 const int ledPin = 6;  // LED DIN pin
-const int plugDetectPin = 7;  // Plug detection circuit
 
 // Variables for button debouncing & button state tracking
 int buttonState = HIGH;         // current stable state
 int lastButtonState = HIGH;     // previous reading
-const unsigned long debounceDelay = 50; // milliseconds
-const unsigned long longPressTime = 800; // milliseconds
+const unsigned long debounceDelay = 50;
+const unsigned long longPressTime = 600;
+const unsigned long superlongPressTime = 1800;
 unsigned long lastDebounceTime = 0;  // last time the input changed
 unsigned long buttonPressStart = 0;  // time when button was pressed
 bool longPressEventTriggered = false; // ensure long press is triggered only once
@@ -33,12 +33,14 @@ const int numLEDs = 3;
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(numLEDs, ledPin, NEO_GRB + NEO_KHZ800);
 const uint32_t primaryLEDColor = strip.Color(220, 185, 156);
 const uint32_t maxModeLEDColor = strip.Color(116, 22, 204);
+const int maxBrightness = 220;
 const int maxModeFadeInBrightness = 100;
 int currentBrightness = maxModeFadeInBrightness;
 int maxModeFadeAmount = 5;
 
 // Battery management settings
-const int batteryIndicatorTimer = 1200;  // Show battery status for two seconds on boot
+const int batteryIndicatorTimer = 650;  // Show battery status for 0.65 seconds on boot
+const int showBatIndicatorTimer = 500;  // Show battery status for 0.65 seconds in operation when triggered
 const uint32_t fullBatteryLEDColor = strip.Color(0, 255, 0);
 const uint32_t midRangeBatteryLEDColor = strip.Color(255, 255, 0);
 const uint32_t lowBatteryLEDColor = strip.Color(255, 0, 0);
@@ -49,11 +51,13 @@ int batIndicatorBrightness = 30;
 bool isCurrentChargeCycleComplete = false;
 
 // Deep sleep settings
+const uint64_t WAKE_UP_LOW_PIN_MASK = (1ULL << buttonPin);
+const uint64_t WAKE_UP_HIGH_PIN_MASK = (1ULL << plugDetectPin);
 const int dormantTimer = 120000;  // Two minutes of inactivity will put the device into sleep mode
-const int warningTimer = 3000;  // Warn for four seconds before going into sleep mode
+const int deepSleepPrepTimer = 2000;  // Warn for two seconds before going into sleep mode
 const int sleepModeBrightness = 100;
 const uint32_t sleepModeLEDColor = strip.Color(0, 191, 255);
-const uint64_t WAKE_UP_PIN_MASK = 1ULL << buttonPin;
+bool isUSBPlugged = false;
 
 
 void setup() {
@@ -112,7 +116,10 @@ void loop() {
 
     // Update lastButtonState to avoid false triggers when unplugged later.
     lastButtonState = digitalRead(buttonPin);
-    lastDebounceTime = currentTime + dormantTimer;  // Go straight to sleep when finish charging.
+
+    // Go straight to sleep when USB is unplugged.
+    lastDebounceTime = currentTime;  // Avoid entering default deep sleep prep
+    isUSBPlugged = true;
 
     // Display battery level: Stop animating indicator lights when the battery is 99% charged
     float Vbattf = measureBatteryLevel();
@@ -140,12 +147,12 @@ void loop() {
     isCurrentChargeCycleComplete = false;
   }
 
-  // If the button reading changes, reset the debounce timer.
+  // If the button reading changes, reset the debounce timer
   if (reading != lastButtonState) {
     lastDebounceTime = currentTime;
   }
 
-  // Only consider the reading stable if it has been stable for the debounce period.
+  // Only consider the reading stable if it has been stable for the debounce period
   if ((currentTime - lastDebounceTime) > debounceDelay) {
     // If the stable reading is different from the last known state, update the state.
     if (reading != buttonState) {
@@ -160,18 +167,35 @@ void loop() {
       } else {
         // Button released: determine press duration.
         unsigned long pressDuration = currentTime - buttonPressStart;
-        if (pressDuration >= longPressTime) {
+        if (pressDuration < longPressTime) {
+          // Short press: cycle through states.
+          motorState = (motorState + 1) % sizeof(speeds);
+          ledcWrite(pwmPin, speeds[motorState]);
+        } else if ((pressDuration >= longPressTime) && (pressDuration < superlongPressTime)) {
           // Long press detected: reset motor state to OFF.
           motorState = 0;
           ledcWrite(pwmPin, speeds[motorState]);
-
-          // Log
-          // Serial.println("Current vibration strength mode: OFF (long press reset)");
-
-          // Enter deep sleep by long pressing at state 0
+          // Show battery power by long pressing at state 0
+          if (stateAtPress == 0) {
+            unsigned long showBatIndicatorEndTime = millis() + showBatIndicatorTimer;
+            int currentBatIndicatorBrightness = 0;
+            int delta = 5;
+            while(millis() < showBatIndicatorEndTime) {
+              currentBatIndicatorBrightness += delta;
+              if (currentBatIndicatorBrightness == 0 || currentBatIndicatorBrightness == batIndicatorBrightness) {
+                delta = -delta;
+              }
+              strip.setBrightness(currentBatIndicatorBrightness);
+              setBatteryIndicator();
+              strip.show();
+              delay(30);
+            }
+          }
+        } else {
+          // Enter deep sleep by (super) long pressing at state 0
           if (stateAtPress == 0) {
             // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
-            unsigned long sleepModeFadeEndTime = millis() + warningTimer;
+            unsigned long sleepModeFadeEndTime = millis() + deepSleepPrepTimer;
             int currentSleepModeBrightness = 0;
             int delta = 5;
             while(millis() < sleepModeFadeEndTime) {
@@ -191,37 +215,41 @@ void loop() {
             ledcWrite(pwmPin, 0);
             delay(100);
 
-            // Enable button interrupt to turn the device back on
-            esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_LOW);
+            // Enable button & USB interrupt to turn the device back on
+            esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_LOW_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_LOW);
+            esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_HIGH_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_HIGH);
             delay(100);
             esp_deep_sleep_start();
           }
-        } else {
-          // Short press: cycle through states.
-          motorState = (motorState + 1) % sizeof(speeds);
-          ledcWrite(pwmPin, speeds[motorState]);
-
-          // Log
-          // if (motorState == 0) {
-          //   Serial.println("Current vibration strength mode: OFF");
-          // } else {
-          //   Serial.println("Current vibration strength mode: " + String(motorState));
-          // }
         }
       }
     } else {
       // While the button is continuously pressed, check for a long press.
-      if (buttonState == LOW && !longPressEventTriggered && (currentTime - buttonPressStart >= longPressTime)) {
+      if (buttonState == LOW && !longPressEventTriggered && (currentTime - buttonPressStart >= longPressTime) && (currentTime - buttonPressStart < superlongPressTime)) {
         longPressEventTriggered = true; // ensure it triggers only once
         motorState = 0;
         ledcWrite(pwmPin, speeds[motorState]);
-
-        // Log
-        // Serial.println("Current vibration strength mode: OFF (long press reset)");
-        // Enter deep sleep by long pressing at state 0
+        // Show battery power by long pressing at state 0
+        if (stateAtPress == 0) {
+          unsigned long showBatIndicatorEndTime = millis() + showBatIndicatorTimer;
+          int currentBatIndicatorBrightness = 0;
+          int delta = 5;
+          while(millis() < showBatIndicatorEndTime) {
+            currentBatIndicatorBrightness += delta;
+            if (currentBatIndicatorBrightness == 0 || currentBatIndicatorBrightness == batIndicatorBrightness) {
+              delta = -delta;
+            }
+            strip.setBrightness(currentBatIndicatorBrightness);
+            setBatteryIndicator();
+            strip.show();
+            delay(30);
+          }
+        }
+      } else if (buttonState == LOW && !longPressEventTriggered && (currentTime - buttonPressStart >= superlongPressTime)) {
+        // Enter deep sleep by (super) long pressing at state 0
         if (stateAtPress == 0) {
           // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
-          unsigned long sleepModeFadeEndTime = millis() + warningTimer;
+          unsigned long sleepModeFadeEndTime = millis() + deepSleepPrepTimer;
           int currentSleepModeBrightness = 0;
           int delta = 5;
           while(millis() < sleepModeFadeEndTime) {
@@ -241,8 +269,9 @@ void loop() {
           ledcWrite(pwmPin, 0);
           delay(100);
 
-          // Enable button interrupt to turn the device back on
-          esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_LOW);
+          // Enable button & USB interrupt to turn the device back on
+          esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_LOW_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_LOW);
+          esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_HIGH_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_HIGH);
           delay(100);
           esp_deep_sleep_start();
         }
@@ -257,7 +286,7 @@ void loop() {
   // MAX mode LEDs are special
   if (motorState == 4) {
     currentBrightness += maxModeFadeAmount;
-    if (currentBrightness == maxModeFadeInBrightness || currentBrightness == 255) {
+    if (currentBrightness == maxModeFadeInBrightness || currentBrightness == maxBrightness) {
       maxModeFadeAmount = -maxModeFadeAmount;
     }
     strip.setBrightness(currentBrightness);
@@ -268,11 +297,8 @@ void loop() {
 
   // Enter deep sleep if not in use
   if (motorState == 0 && (currentTime - lastDebounceTime >= dormantTimer)) {
-    // Log
-    // Serial.println("No button activity detected for " + String(dormantTimer / 1000 / 60) + " minutes and motor is OFF. Automatically entering deep sleep.");
-
     // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
-    unsigned long sleepModeFadeEndTime = millis() + warningTimer;
+    unsigned long sleepModeFadeEndTime = millis() + deepSleepPrepTimer;
     int currentSleepModeBrightness = 0;
     int delta = 5;
     while(millis() < sleepModeFadeEndTime) {
@@ -292,8 +318,40 @@ void loop() {
     ledcWrite(pwmPin, 0);
     delay(100);
 
-    // Enable button interrupt to turn the device back on 
-    esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_LOW);
+    // Enable button & USB interrupt to turn the device back on 
+    esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_LOW_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_LOW);
+    esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_HIGH_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_HIGH);
+    delay(100);
+    esp_deep_sleep_start();
+  }
+
+  // Enter deep sleep after USB is unplugged
+  if (isUSBPlugged) {
+    // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
+    int currentSleepModeBrightness = batIndicatorBrightness;
+    int delta = 5;
+    while(currentSleepModeBrightness != 0) {
+      currentSleepModeBrightness += delta;
+      if (currentSleepModeBrightness == 0 || currentSleepModeBrightness == maxBrightness / 2) {
+        delta = -delta;
+      }
+      strip.setBrightness(currentSleepModeBrightness);
+      setBatteryIndicator();
+      strip.show();
+      delay(10); // Adjust delay for a smoother fade effect
+    }
+
+    // Turn off all LEDs and switch off motor before going into deep sleep
+    setAllLEDsColor(0);
+    strip.show();
+    ledcWrite(pwmPin, 0);
+    delay(100);
+
+    isUSBPlugged = false;
+
+    // Enable button & USB interrupt to turn the device back on
+    esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_LOW_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_LOW);
+    esp_deep_sleep_enable_gpio_wakeup(WAKE_UP_HIGH_PIN_MASK, ESP_GPIO_WAKEUP_GPIO_HIGH);
     delay(100);
     esp_deep_sleep_start();
   }
@@ -304,7 +362,7 @@ void loop() {
 void updateLEDs() {
   if (motorState == 4) { return; }
   // For OFF and three modes
-  strip.setBrightness(255);
+  strip.setBrightness(maxBrightness);
   for (int i = 0; i < numLEDs; i++) {
     if (i < motorState) {
       // Turn on the LED at nth state
