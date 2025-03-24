@@ -171,12 +171,12 @@ void loop() {
           // Short press: cycle through states.
           motorState = (motorState + 1) % sizeof(speeds);
           ledcWrite(pwmPin, speeds[motorState]);
-        } else if ((pressDuration >= longPressTime) && (pressDuration < superlongPressTime)) {
+        } else {
           // Long press detected: reset motor state to OFF.
           motorState = 0;
           ledcWrite(pwmPin, speeds[motorState]);
-          // Show battery power by long pressing at state 0
-          if (stateAtPress == 0) {
+          // At State 0: Show battery power by long pressing or enter deep sleep by (super) long pressing
+          if ((stateAtPress == 0) && (pressDuration < superlongPressTime)) {
             unsigned long showBatIndicatorEndTime = millis() + showBatIndicatorTimer;
             int currentBatIndicatorBrightness = 0;
             int delta = 5;
@@ -190,10 +190,7 @@ void loop() {
               strip.show();
               delay(30);
             }
-          }
-        } else {
-          // Enter deep sleep by (super) long pressing at state 0
-          if (stateAtPress == 0) {
+          } else if ((stateAtPress == 0) && (pressDuration >= superlongPressTime)) {
             // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
             unsigned long sleepModeFadeEndTime = millis() + deepSleepPrepTimer;
             int currentSleepModeBrightness = 0;
@@ -225,12 +222,12 @@ void loop() {
       }
     } else {
       // While the button is continuously pressed, check for a long press.
-      if (buttonState == LOW && !longPressEventTriggered && (currentTime - buttonPressStart >= longPressTime) && (currentTime - buttonPressStart < superlongPressTime)) {
+      if (buttonState == LOW && !longPressEventTriggered && (currentTime - buttonPressStart >= longPressTime)) {
         longPressEventTriggered = true; // ensure it triggers only once
         motorState = 0;
         ledcWrite(pwmPin, speeds[motorState]);
-        // Show battery power by long pressing at state 0
-        if (stateAtPress == 0) {
+        // At State 0: Show battery power by long pressing or enter deep sleep by (super) long pressing
+        if ((stateAtPress == 0) && (currentTime - buttonPressStart < superlongPressTime)) {
           unsigned long showBatIndicatorEndTime = millis() + showBatIndicatorTimer;
           int currentBatIndicatorBrightness = 0;
           int delta = 5;
@@ -244,10 +241,7 @@ void loop() {
             strip.show();
             delay(30);
           }
-        }
-      } else if (buttonState == LOW && !longPressEventTriggered && (currentTime - buttonPressStart >= superlongPressTime)) {
-        // Enter deep sleep by (super) long pressing at state 0
-        if (stateAtPress == 0) {
+        } else if ((stateAtPress == 0) && (currentTime - buttonPressStart >= superlongPressTime)) {
           // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
           unsigned long sleepModeFadeEndTime = millis() + deepSleepPrepTimer;
           int currentSleepModeBrightness = 0;
