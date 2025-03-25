@@ -105,6 +105,7 @@ void loop() {
   int reading = digitalRead(buttonPin);
   unsigned long currentTime = millis();
   int plugState = digitalRead(plugDetectPin);
+  float Vbattf = measureBatteryLevel();
 
   // Disable circuit on plugged in (charging)
   if (plugState == HIGH) {
@@ -122,7 +123,6 @@ void loop() {
     isUSBPlugged = true;
 
     // Display battery level: Stop animating indicator lights when the battery is 99% charged
-    float Vbattf = measureBatteryLevel();
     if (Vbattf >= 4.185) { isCurrentChargeCycleComplete = true; }
     if (!isCurrentChargeCycleComplete) {
       currentBatIndicatorBrightness += batIndicatorFadeAmount;
@@ -137,7 +137,9 @@ void loop() {
       setBatteryIndicator();
       strip.show();
     }
+    
     delay(45);
+    Serial.println(Vbattf);
 
     return;
 
@@ -290,26 +292,32 @@ void loop() {
   }
 
   // Enter deep sleep if not in use
-  if (motorState == 0 && (currentTime - lastDebounceTime >= dormantTimer)) {
-    // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
-    unsigned long sleepModeFadeEndTime = millis() + deepSleepPrepTimer;
-    int currentSleepModeBrightness = 0;
-    int delta = 5;
-    while(millis() < sleepModeFadeEndTime) {
-      currentSleepModeBrightness += delta;
-      if (currentSleepModeBrightness == 0 || currentSleepModeBrightness == sleepModeBrightness) {
-        delta = -delta;
+  if ((motorState == 0 && (currentTime - lastDebounceTime >= dormantTimer)) || (Vbattf < 2.9)) {
+    // Force motor & LED OFF Before going into deep sleep
+    motorState = 0;
+    ledcWrite(pwmPin, speeds[motorState]);
+
+    // If current battery is below 2.9V, we want it to go straight to deep sleep
+    if (Vbattf > 2.9) {
+      // Fading amber light to let the user know the device is about to enter power saving / "deep sleep" mode
+      unsigned long sleepModeFadeEndTime = millis() + deepSleepPrepTimer;
+      int currentSleepModeBrightness = 0;
+      int delta = 5;
+      while(millis() < sleepModeFadeEndTime) {
+        currentSleepModeBrightness += delta;
+        if (currentSleepModeBrightness == 0 || currentSleepModeBrightness == sleepModeBrightness) {
+          delta = -delta;
+        }
+        strip.setBrightness(currentSleepModeBrightness);
+        strip.setPixelColor(1, sleepModeLEDColor);
+        strip.show();
+        delay(30); // Adjust delay for a smoother fade effect
       }
-      strip.setBrightness(currentSleepModeBrightness);
-      strip.setPixelColor(1, sleepModeLEDColor);
-      strip.show();
-      delay(30); // Adjust delay for a smoother fade effect
     }
 
-    // Turn off all LEDs and switch off motor before going into deep sleep
+    // Turn off all LEDs before going into deep sleep
     setAllLEDsColor(0);
     strip.show();
-    ledcWrite(pwmPin, 0);
     delay(100);
 
     // Enable button & USB interrupt to turn the device back on 
